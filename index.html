@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PDF to JPG</title>
+<meta name="theme-color" content="#fafafa">
+<meta name="color-scheme" content="only light">
+<link rel="icon" href="/icons/icon-192.png">
+<link rel="stylesheet" href="/theme.css">
+<style>
+  .drop{display:flex; flex-direction:column; align-items:center; justify-content:center; gap:var(--s1);
+        min-height:160px; padding:var(--s3); border-radius:var(--r-card); background:var(--soft);
+        text-align:center; cursor:pointer}
+  .drop.over{box-shadow:0 0 0 2px var(--accent)}
+  .drop .fname{word-break:break-all}
+  .label{font-size:var(--fs-sm); color:var(--muted); margin:var(--s3) 0 var(--s1)}
+  .full{width:100%; margin-top:var(--s3)}
+  .bar{height:8px; border-radius:var(--r-pill); background:var(--soft); overflow:hidden; margin-top:var(--s3)}
+  .bar > div{height:100%; width:0; background:var(--accent); transition:width .2s}
+  #status{margin-top:var(--s1); font-size:var(--fs-sm)}
+  .hidden{display:none !important}
+  button:disabled{opacity:.45; cursor:default}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <a class="back" href="/">← All apps</a>
+  <h1 class="title">PDF to JPG</h1>
+  <p class="sub">Each page becomes one JPG. Your file never leaves this phone.</p>
+
+  <div class="card">
+    <label class="drop" id="drop">
+      <span id="dropText">Tap to pick a PDF<br><span class="muted">or drop it here</span></span>
+      <input type="file" id="file" accept="application/pdf,.pdf" hidden>
+    </label>
+
+    <div class="label">Quality (DPI)</div>
+    <div class="seg" id="dpi">
+      <button data-dpi="150">150</button>
+      <button data-dpi="200">200</button>
+      <button data-dpi="300" class="on">300</button>
+    </div>
+    <div class="label" style="margin-top:var(--s1)">150 = small files · 300 = print quality</div>
+
+    <button class="btn btn-primary full" id="go" disabled>Convert</button>
+
+    <div class="bar hidden" id="bar"><div id="barFill"></div></div>
+    <div id="status" class="muted"></div>
+  </div>
+
+  <p class="note hidden" id="err"></p>
+</div>
+
+<script src="lib/jszip.min.js"></script>
+<script type="module">
+import * as pdfjsLib from "./lib/pdf.min.mjs";
+
+// ================= SETTINGS =================
+pdfjsLib.GlobalWorkerOptions.workerSrc = "./lib/pdf.worker.min.mjs";
+const JPG_QUALITY = 0.95;          // same as jpg_quality=95 in Colab
+const MAX_PIXELS  = 16_000_000;    // phone canvas safety limit (A4 @300 DPI ≈ 8.7M)
+const log = (...a) => console.log("[pdf2jpg]", ...a);
+
+// ================= STATE =================
+let pdfFile = null;
+let dpi = 300;
+
+// ================= UI ELEMENTS =================
+const $ = id => document.getElementById(id);
+const fileInput = $("file"), drop = $("drop"), dropText = $("dropText");
+const goBtn = $("go"), bar = $("bar"), barFill = $("barFill"), statusEl = $("status"), errEl = $("err");
+
+// ================= STEP 1: PICK FILE =================
+fileInput.addEventListener("change", () => pickFile(fileInput.files[0]));
+drop.addEventListener("dragover",  e => { e.preventDefault(); drop.classList.add("over"); });
+drop.addEventListener("dragleave", () => drop.classList.remove("over"));
+drop.addEventListener("drop", e => { e.preventDefault(); drop.classList.remove("over"); pickFile(e.dataTransfer.files[0]); });
+
+function pickFile(f) {
+  hideError();
+  if (!f) return;
+  if (!/\.pdf$/i.test(f.name) && f.type !== "application/pdf") return showError("That is not a PDF file.");
+  pdfFile = f;
+  dropText.innerHTML = `<span class="fname">${escapeHtml(f.name)}</span><br><span class="muted">${sizeText(f.size)} · tap to change</span>`;
+  goBtn.disabled = false;
+  statusEl.textContent = "";
+  bar.classList.add("hidden");
+  log("picked", f.name, f.size, "bytes");
+}
+
+// ================= STEP 2: PICK DPI =================
+$("dpi").addEventListener("click", e => {
+  const b = e.target.closest("button"); if (!b) return;
+  [...$("dpi").children].forEach(x => x.classList.toggle("on", x === b));
+  dpi = Number(b.dataset.dpi);
+  log("dpi", dpi);
+});
+
+// ================= STEP 3: CONVERT =================
+goBtn.addEventListener("click", async () => {
+  if (!pdfFile) return;
+  hideError();
+  goBtn.disabled = true;
+  bar.classList.remove("hidden");
+  setProgress(0, "Opening PDF…");
+
+  const base = pdfFile.name.replace(/\.pdf$/i, "");
+  let task;
+  try {
+    // 3a. Open PDF (same as fitz.open)
+    const data = new Uint8Array(await pdfFile.arrayBuffer());
+    task = pdfjsLib.getDocument({ data });
+    const pdf = await task.promise;
+    const n = pdf.numPages;
+    log("pages", n);
+
+    // 3b. Convert each page, one at a time (keeps phone memory low)
+    const jpgs = [];   // { name, blob }
+    for (let i = 1; i <= n; i++) {
+      setProgress((i - 1) / n, `Converting page ${i} of ${n}…`);
+      const blob = await renderPageToJpg(pdf, i, dpi);
+      jpgs.push({ name: `${base}_page_${String(i).padStart(String(n).length, "0")}.jpg`, blob });
+      log("page", i, "done", (blob.size/1024).toFixed(0), "KB");
+    }
+
+    // 3c. One page → give the JPG directly. Many pages → ZIP them.
+    if (jpgs.length === 1) {
+      download(jpgs[0].blob, jpgs[0].name);
+      setProgress(1, "Done. 1 JPG downloaded.");
+    } else {
+      setProgress(1, "Making ZIP…");
+      const zip = new JSZip();
+      jpgs.forEach(j => zip.file(j.name, j.blob));
+      // STORE = no compression: JPGs are already compressed, so this is fast
+      const zipBlob = await zip.generateAsync({ type: "blob", compression: "STORE" });
+      download(zipBlob, `${base}_jpg.zip`);
+      setProgress(1, `Done. ${jpgs.length} JPGs in one ZIP (${sizeText(zipBlob.size)}).`);
+    }
+  } catch (err) {
+    console.error("[pdf2jpg]", err);
+    bar.classList.add("hidden");
+    statusEl.textContent = "";
+    if (err?.name === "PasswordException") showError("This PDF is locked with a password. Not supported yet.");
+    else showError("Could not convert this PDF: " + (err?.message || err));
+  } finally {
+    if (task) task.destroy();   // free pdf.js memory
+    goBtn.disabled = false;
+  }
+});
+
+// ================= HELPERS =================
+
+// Draw one page on a canvas → JPG blob → free the canvas memory
+async function renderPageToJpg(pdf, pageNo, dpi) {
+  const page = await pdf.getPage(pageNo);
+  let scale = dpi / 72;                                   // PDF unit = 1/72 inch
+  let vp = page.getViewport({ scale });
+  if (vp.width * vp.height > MAX_PIXELS) {                // huge page → shrink to safe size
+    scale *= Math.sqrt(MAX_PIXELS / (vp.width * vp.height));
+    vp = page.getViewport({ scale });
+    log("page", pageNo, "too big, scale reduced to", scale.toFixed(2));
+  }
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.floor(vp.width);
+  canvas.height = Math.floor(vp.height);
+  const ctx = canvas.getContext("2d", { alpha: false }); // alpha=False, like Colab
+  await page.render({ canvasContext: ctx, viewport: vp, background: "#ffffff" }).promise;
+  const blob = await new Promise((ok, bad) =>
+    canvas.toBlob(b => b ? ok(b) : bad(new Error("Phone ran out of memory on page " + pageNo)), "image/jpeg", JPG_QUALITY));
+  canvas.width = canvas.height = 0;                       // release memory now
+  page.cleanup();
+  return blob;
+}
+
+function download(blob, name) {
+  const url = URL.createObjectURL(blob);
+  const a = Object.assign(document.createElement("a"), { href: url, download: name });
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 60_000);
+}
+
+function setProgress(frac, text) {
+  barFill.style.width = Math.round(frac * 100) + "%";
+  statusEl.textContent = text;
+}
+function showError(msg) { errEl.textContent = msg; errEl.classList.remove("hidden"); }
+function hideError()    { errEl.classList.add("hidden"); }
+function sizeText(b)    { return b < 1048576 ? Math.max(1, Math.round(b/1024)) + " KB" : (b/1048576).toFixed(1) + " MB"; }
+function escapeHtml(s) { return s.replace(/[&<>"]/g, c => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;" }[c])); }
+</script>
+</body>
+</html>
