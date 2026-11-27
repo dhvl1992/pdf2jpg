@@ -8,6 +8,7 @@
 <meta name="color-scheme" content="only light">
 <link rel="icon" href="/icons/icon-192.png">
 <link rel="stylesheet" href="/theme.css">
+<link rel="manifest" href="/manifest.json">
 <style>
   .drop{display:flex; flex-direction:column; align-items:center; justify-content:center; gap:var(--s1);
         min-height:160px; padding:var(--s3); border-radius:var(--r-card); background:var(--soft);
@@ -25,7 +26,6 @@
 </head>
 <body>
 <div class="wrap">
-  <a class="back" href="/">← All apps</a>
   <h1 class="title">PDF to JPG</h1>
   <p class="sub">Each page becomes one JPG. Your file never leaves this phone.</p>
 
@@ -189,5 +189,7 @@ function hideError()    { errEl.classList.add("hidden"); }
 function sizeText(b)    { return b < 1048576 ? Math.max(1, Math.round(b/1024)) + " KB" : (b/1048576).toFixed(1) + " MB"; }
 function escapeHtml(s) { return s.replace(/[&<>"]/g, c => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;" }[c])); }
 </script>
+<!-- Shared top bar (logo → home, account menu): /topbar.js in the hub repo -->
+<script src="/topbar.js"></script>
 </body>
 </html>
